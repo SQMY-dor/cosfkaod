@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CosFkAod</string>
+    <string name="xposed_description">ColorOS: allow 全景沉浸 (panoramic) AOD with third-party themes, and keep it after applying a theme.</string>
+</resources>

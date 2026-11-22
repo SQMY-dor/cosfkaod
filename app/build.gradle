@@ -1,0 +1,48 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'io.github.sqmydor.panoramicaod'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "io.github.sqmydor.panoramicaod"
+        minSdk 29          // ColorOS 15/17 ~ Android 14; 29 keeps it broad
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    // Release signing: keystore is committed (PKCS12, AES-encrypted by its password);
+    // the password only lives in the repo secret SIGNING_PASSWORD.
+    def signingPw = System.getenv("SIGNING_PASSWORD")
+    signingConfigs {
+        if (signingPw) {
+            release {
+                storeFile rootProject.file("signing/release.jks")
+                storeType "pkcs12"
+                storePassword signingPw
+                keyAlias "themelocalunlock"
+                keyPassword signingPw
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (signingPw) signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}
+
+dependencies {
+    // Classic Xposed API, provided by LSPosed at runtime. compileOnly = not bundled.
+    compileOnly 'de.robv.android.xposed:api:82'
+}
