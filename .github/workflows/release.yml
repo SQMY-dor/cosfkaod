@@ -1,0 +1,242 @@
+name: Release
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      release_title:
+        description: 'Release title on Xposed-Modules-Repo (defaults to versionName)'
+        required: false
+        type: string
+      release_notes:
+        description: 'Release notes on Xposed-Modules-Repo (optional)'
+        required: false
+        type: string
+      sync_metadata:
+        description: 'Sync SUMMARY, SOURCE_URL, and README.md to Xposed-Modules-Repo'
+        required: false
+        default: true
+        type: boolean
+      publish_lsposed_release:
+        description: 'Create a release with the signed APK on Xposed-Modules-Repo'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      LSPOSED_REPO: Xposed-Modules-Repo/io.github.sqmy_dor.panoramicaod
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+      XPOSED_REPO_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify signing secret
+        if: ${{ env.SIGNING_PASSWORD == '' }}
+        run: |
+          echo "::error::SIGNING_PASSWORD secret is required to build a signed release APK."
+          exit 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build signed release APK
+        run: gradle --no-daemon assembleRelease
+
+      - name: Inspect built APK and prepare release asset
+        id: apk
+        run: |
+          python3 - <<'PY'
+          import os, re, shutil, subprocess, zipfile
+
+          apk_src = "app/build/outputs/apk/release/app-release.apk"
+          if not os.path.isfile(apk_src):
+              raise SystemExit(f"Signed release APK not found at {apk_src}")
+
+          with zipfile.ZipFile(apk_src) as zf:
+              if "assets/xposed_init" not in zf.namelist():
+                  raise SystemExit("APK is missing assets/xposed_init")
+              entry = zf.read("assets/xposed_init").decode("utf-8").strip()
+              if entry != "io.github.sqmy_dor.panoramicaod.HookEntry":
+                  raise SystemExit(f"Unexpected assets/xposed_init entry: {entry!r}")
+
+          android_home = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+          build_tools_dir = os.path.join(android_home, "build-tools")
+          versions = sorted(
+              [v for v in os.listdir(build_tools_dir) if os.path.isfile(os.path.join(build_tools_dir, v, "aapt2"))],
+              key=lambda v: [(0, int(x)) if x.isdigit() else (1, x) for x in re.split(r'[.-]', v)],
+          )
+          if not versions:
+              raise SystemExit(f"No aapt2 found under {build_tools_dir}")
+          aapt2 = os.path.join(build_tools_dir, versions[-1], "aapt2")
+
+          badging = subprocess.check_output([aapt2, "dump", "badging", apk_src], text=True)
+          m = re.search(r"package:\s+name='([^']+)'\s+versionCode='([^']+)'\s+versionName='([^']+)'", badging)
+          if not m:
+              raise SystemExit(f"Failed to parse aapt2 badging output:\n{badging[:500]}")
+
+          xmltree = subprocess.check_output([aapt2, "dump", "xmltree", apk_src, "--file", "AndroidManifest.xml"], text=True)
+          if "xposedminversion" not in xmltree:
+              raise SystemExit("AndroidManifest.xml is missing xposedminversion metadata")
+
+          pkg, version_code, version_name = m.group(1), m.group(2), m.group(3)
+          if pkg != "io.github.sqmy_dor.panoramicaod":
+              raise SystemExit(f"Unexpected package name: {pkg}")
+
+          lsposed_tag = f"{version_code}-{version_name.replace(' ', '_')}"
+          os.makedirs("dist", exist_ok=True)
+          apk_dest = f"dist/CosFkAod-{version_name.replace(' ', '_')}.apk"
+          shutil.copy2(apk_src, apk_dest)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"package={pkg}\n")
+              out.write(f"version_code={version_code}\n")
+              out.write(f"version_name={version_name}\n")
+              out.write(f"lsposed_tag={lsposed_tag}\n")
+              out.write(f"apk_path={apk_dest}\n")
+
+          print(f"Prepared {apk_dest} (package={pkg}, tag={lsposed_tag})")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CosFkAod-release
+          path: ${{ steps.apk.outputs.apk_path }}
+
+      - name: Upload signed APK to source repository release
+        if: ${{ github.event_name == 'release' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          APK_PATH: ${{ steps.apk.outputs.apk_path }}
+        run: gh release upload "$RELEASE_TAG" "$APK_PATH" --clobber
+
+      - name: Skip LSPosed repo sync if XPOSED_REPO_TOKEN is not set
+        if: ${{ env.XPOSED_REPO_TOKEN == '' }}
+        run: |
+          echo "::notice::XPOSED_REPO_TOKEN secret is not set; skipping sync to $LSPOSED_REPO."
+
+      - name: Verify write access to Xposed-Modules-Repo
+        if: ${{ env.XPOSED_REPO_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        run: |
+          CAN_PUSH=$(gh api "repos/$LSPOSED_REPO" --jq '.permissions.push // false')
+          if [ "$CAN_PUSH" != "true" ]; then
+            echo "::error::XPOSED_REPO_TOKEN does not have push access to $LSPOSED_REPO. Ensure the repo exists, collaborator invitation is accepted, and the token grants write access (Contents: Read and write)."
+            exit 1
+          fi
+
+      - name: Sync metadata files to Xposed-Modules-Repo
+        if: ${{ env.XPOSED_REPO_TOKEN != '' && (github.event_name == 'release' || inputs.sync_metadata == true) }}
+        env:
+          GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, subprocess
+
+          repo = os.environ["LSPOSED_REPO"]
+          files = ["SUMMARY", "SOURCE_URL", "README.md"]
+
+          for name in files:
+              local_path = os.path.join(".github", "lsposed", name)
+              with open(local_path, "rb") as f:
+                  local_bytes = f.read()
+
+              proc = subprocess.run(
+                  ["gh", "api", f"repos/{repo}/contents/{name}"],
+                  capture_output=True,
+                  text=True,
+              )
+
+              remote_sha = None
+              if proc.returncode == 0:
+                  data = json.loads(proc.stdout)
+                  remote_sha = data.get("sha")
+                  remote_bytes = base64.b64decode(data.get("content", ""))
+                  if remote_bytes == local_bytes:
+                      print(f"{name}: unchanged, skipping")
+                      continue
+              elif "404" not in proc.stderr and "Not Found" not in proc.stdout:
+                  raise SystemExit(f"Failed to fetch {name}: {proc.stderr}\n{proc.stdout}")
+
+              payload = {
+                  "message": f"Sync {name} from SQMY-dor/cosfkaod",
+                  "content": base64.b64encode(local_bytes).decode("ascii"),
+              }
+              if remote_sha:
+                  payload["sha"] = remote_sha
+
+              subprocess.run(
+                  ["gh", "api", "-X", "PUT", f"repos/{repo}/contents/{name}", "--input", "-"],
+                  input=json.dumps(payload),
+                  text=True,
+                  check=True,
+                  stdout=subprocess.DEVNULL,
+              )
+              print(f"{name}: synced")
+          PY
+
+      - name: Publish release to Xposed-Modules-Repo
+        if: ${{ env.XPOSED_REPO_TOKEN != '' && (github.event_name == 'release' || inputs.publish_lsposed_release == true) }}
+        env:
+          GH_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          SOURCE_RELEASE_TITLE: ${{ github.event.release.name }}
+          SOURCE_RELEASE_BODY: ${{ github.event.release.body }}
+          SOURCE_PRERELEASE: ${{ github.event.release.prerelease }}
+          INPUT_TITLE: ${{ inputs.release_title }}
+          INPUT_NOTES: ${{ inputs.release_notes }}
+          VERSION_NAME: ${{ steps.apk.outputs.version_name }}
+          LSPOSED_TAG: ${{ steps.apk.outputs.lsposed_tag }}
+          APK_PATH: ${{ steps.apk.outputs.apk_path }}
+        run: |
+          if gh api "repos/$LSPOSED_REPO/releases/tags/$LSPOSED_TAG" >/dev/null 2>&1; then
+            echo "::warning::Release $LSPOSED_TAG already exists on $LSPOSED_REPO. Bump versionCode/versionName before publishing a new release (LSPosed bot ignores asset-only edits)."
+            exit 0
+          fi
+
+          python3 - <<'PY'
+          import os
+
+          event_name = os.environ["EVENT_NAME"]
+          version_name = os.environ["VERSION_NAME"]
+
+          if event_name == "release":
+              title = os.environ.get("SOURCE_RELEASE_TITLE") or version_name
+              notes = os.environ.get("SOURCE_RELEASE_BODY") or f"CosFkAod {version_name}"
+          else:
+              title = os.environ.get("INPUT_TITLE") or version_name
+              notes = os.environ.get("INPUT_NOTES") or f"CosFkAod {version_name}"
+
+          with open("dist/release_title.txt", "w", encoding="utf-8") as f:
+              f.write(title.strip())
+          with open("dist/release_notes.md", "w", encoding="utf-8") as f:
+              f.write(notes)
+          PY
+
+          TITLE=$(cat dist/release_title.txt)
+          EXTRA_ARGS=()
+          if [ "$EVENT_NAME" = "release" ] && [ "$SOURCE_PRERELEASE" = "true" ]; then
+            EXTRA_ARGS+=(--prerelease)
+          fi
+
+          # Passing the APK asset to `gh release create` creates a draft release,
+          # uploads the APK, and then publishes it so XposedBot sees the APK on publish.
+          gh release create "$LSPOSED_TAG" "$APK_PATH" \
+            -R "$LSPOSED_REPO" \
+            --title "$TITLE" \
+            --notes-file dist/release_notes.md \
+            "${EXTRA_ARGS[@]}"
