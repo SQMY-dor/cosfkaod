@@ -3,11 +3,11 @@ plugins {
 }
 
 android {
-    namespace 'io.github.sqmydor.panoramicaod'
+    namespace 'io.github.sqmy_dor.panoramicaod'
     compileSdk 34
 
     defaultConfig {
-        applicationId "io.github.sqmydor.panoramicaod"
+        applicationId "io.github.sqmy_dor.panoramicaod"
         minSdk 29          // ColorOS 15/17 ~ Android 14; 29 keeps it broad
         targetSdk 34
         versionCode 1

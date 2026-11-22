@@ -1,4 +1,4 @@
-package io.github.sqmydor.panoramicaod;
+package io.github.sqmy_dor.panoramicaod;
 
 import android.content.ContentResolver;
 import android.content.Context;

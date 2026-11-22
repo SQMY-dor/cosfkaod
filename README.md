@@ -9,7 +9,7 @@ Scope: 息屏 (com.oplus.aod) + 主题商店 + 主题基础服务, then reboot. 
 
 Names are obfuscated and build-specific (息屏 17.001.0021). Log tag: `CosFkAod`.
 
-CI builds debug on every push; signed release when the `SIGNING_PASSWORD` secret is set.
+CI builds debug on every push; signed release when the `SIGNING_PASSWORD` secret is set. Publishing a GitHub Release (or running the `Release` workflow manually) builds and attaches the signed APK, and syncs metadata + release to `Xposed-Modules-Repo/io.github.sqmy_dor.panoramicaod` when `XPOSED_REPO_TOKEN` is configured.
 
 ## License
 
